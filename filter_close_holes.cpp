@@ -146,7 +146,7 @@ QString QhullPlugin::pluginName() const
 QString QhullPlugin::filterName(ActionIDType f) const
 {
 	switch (f) {
-	case FP_CLOSEHOLES: return QString("Close holes 2 (Liepa)");
+	case FP_CLOSEHOLES: return QString("Close holes 2");
 	default: assert(0); return QString();
 	}
 }
@@ -182,6 +182,16 @@ RichParameterList QhullPlugin::initParameterList(const QAction* action, const Me
 	RichParameterList parlst;
 	switch (ID(action)) {
 	case FP_CLOSEHOLES:
+		parlst.addParam(RichFloat(
+			"edgeLength",
+			(float) -1.0,
+			"Edge length ",
+			"Chose the edge lengths of the new patch, at normal it will predict the edge length"));
+		parlst.addParam(RichFloat(
+			"densityFactor",
+			(float) 1.41,
+			"Density factor ",
+			"The value to control to length of each edges"));
 		parlst.addParam(RichInt(
 			"MaxHoleSize",
 			(int) 50,
@@ -222,17 +232,17 @@ double weightFunction(Point3m a, Point3m b, Point3m c)
 	return 0.5 * sqrt(ans.x * ans.x + ans.y * ans.y + ans.z * ans.z);
 }
 
-void trace(Hole hole, CMeshO& cm, vector<vector<int>> O, vector<Triangle>& S, int i, int k)
+void trace(vector<int> subhole, CMeshO& cm, vector<vector<int>> O, vector<Triangle>& S, int i, int k)
 {
 	if (i + 2 == k)
-		S.push_back({hole.vertIdx[i], hole.vertIdx[i + 1], hole.vertIdx[k]});
+		S.push_back({subhole[i], subhole[i + 1], subhole[k]});
 	else {
 		int curO = O[i][k];
 		if (curO != i + 1)
-			trace(hole, cm, O, S, i, curO);
-		S.push_back({hole.vertIdx[i], hole.vertIdx[curO], hole.vertIdx[k]});
+			trace(subhole, cm, O, S, i, curO);
+		S.push_back({subhole[i], subhole[curO], subhole[k]});
 		if (curO != k - 1)
-			trace(hole, cm, O, S, curO, k);
+			trace(subhole, cm, O, S, curO, k);
 	}
 }
 
@@ -431,13 +441,13 @@ void hashFunc(CMeshO& cm, vector<string> edges_hash)
 }
 
 void closeHoleByMinimumArea(
-	Hole&              curHole,
+	vector<int> subhole,
 	CMeshO&           cm,
 	vector<Triangle>& triangles)
 {
-	curHole.vertIdx.push_back(curHole.vertIdx[0]);
+	subhole.push_back(subhole[0]);
 
-	int                   sz = curHole.vertIdx.size();
+	int                   sz = subhole.size();
 	vector<vector<float>> f(sz, vector<float>(sz, 1000000000.0));
 	vector<vector<int>>   O(sz, vector<int>(sz, 0));
 
@@ -446,7 +456,9 @@ void closeHoleByMinimumArea(
 		f[i][i + 1] = 0;
 	for (int i = 0; i <= sz - 3; i++)
 		f[i][i + 2] = weightFunction(
-			cm.vert[curHole.vertIdx[i]].P(), cm.vert[curHole.vertIdx[i + 1]].P(), cm.vert[curHole.vertIdx[i + 2]].P());
+			cm.vert[subhole[i]].P(),
+			cm.vert[subhole[i + 1]].P(),
+			cm.vert[subhole[i + 2]].P());
 
 	for (int j = 2; j <= sz - 1; j++) {
 		for (int i = 0; i <= sz - j - 1; i++) {
@@ -455,7 +467,7 @@ void closeHoleByMinimumArea(
 				float val =
 					f[i][m] + f[m][k] +
 					weightFunction(
-						cm.vert[curHole.vertIdx[i]].P(), cm.vert[curHole.vertIdx[m]].P(), cm.vert[curHole.vertIdx[k]].P());
+						cm.vert[subhole[i]].P(), cm.vert[subhole[m]].P(), cm.vert[subhole[k]].P());
 				if (val < f[i][k]) {
 					f[i][k] = val;
 					O[i][k] = m;
@@ -463,9 +475,8 @@ void closeHoleByMinimumArea(
 			}
 		}
 	}
-
-	trace(curHole, cm, O, triangles, 0, sz - 1);
-	curHole.vertIdx.pop_back();
+	trace(subhole, cm, O, triangles, 0, sz - 1);
+	subhole.pop_back();
 }
 
 Point3m calcHoleCenter(CMeshO& cm, vector<int> vertIdx)
@@ -476,6 +487,36 @@ Point3m calcHoleCenter(CMeshO& cm, vector<int> vertIdx)
 	}
 	center /= (vertIdx.size());
 	return center;
+}
+
+int closeHoleByCenter2(CMeshO& cm, vector<int> vertIdx, vector<Triangle>& triangles)
+{
+	vertIdx.push_back(vertIdx[0]);
+	Point3m center(0, 0, 0);
+	for (int i = 0; i < vertIdx.size() - 1; i++) {
+		center += cm.vert[vertIdx[i]].P();
+	}
+	center /= (vertIdx.size() - 1);
+
+	tri::Allocator<CMeshO>::AddVertex(cm, center);
+	cm.vert.back().C() = Color4b::Green;
+	int centerIdx      = cm.vert.back().Index();
+
+	for (int i = 0; i < vertIdx.size() - 1; i++) {
+		triangles.push_back({vertIdx[i], vertIdx[i + 1], centerIdx});
+		/*tri::Allocator<CMeshO>::AddFace(cm, vertIdx[i], vertIdx[i + 1], centerIdx);
+		cm.face.back().C() = Color4b::Magenta;*/
+	}
+
+	// Update topology, normal. Delete duplicate vertices, faces
+	tri::UpdateBounding<CMeshO>::Box(cm);
+	tri::UpdateNormal<CMeshO>::NormalizePerVertex(cm);
+	tri::UpdateTopology<CMeshO>::FaceFace(cm);
+	tri::UpdateTopology<CMeshO>::VertexFace(cm);
+	tri::Clean<CMeshO>::RemoveDuplicateFace(cm);
+	tri::Clean<CMeshO>::RemoveDuplicateVertex(cm);
+
+	return centerIdx;
 }
 
 void closeHoleByCenter(CMeshO& cm, vector<int> vertIdx)
@@ -504,146 +545,6 @@ void closeHoleByCenter(CMeshO& cm, vector<int> vertIdx)
 	tri::Clean<CMeshO>::RemoveDuplicateFace(cm);
 	tri::Clean<CMeshO>::RemoveDuplicateVertex(cm);
 }
-
-
-void closeHoleByConcavity(CMeshO& cm, vector<int> vertIdx, vector<Triangle>& triangles)
-{
-	vector<string> edges_hash;
-	hashFunc(cm, edges_hash);
-
-	if (vertIdx.size() == 3) {
-		triangles.push_back({vertIdx[0], vertIdx[1], vertIdx[2]});
-		return;
-	}
-
-	vector<vector<int>> queue = {vector<int>(vertIdx.rbegin(), vertIdx.rend())};
-	while (!queue.empty()) {
-		vector<int> curV = queue.back();
-		queue.pop_back();
-		if (curV.size() == 3) {
-			triangles.push_back({curV[0], curV[1], curV[2]});
-			continue;
-		}
-
-		vector<double> edge_len(curV.size());
-		for (int i = 0; i < curV.size(); i++) {
-			edge_len[i] = (cm.vert[curV[(i + 1) % curV.size()]].P() - cm.vert[curV[i]].P()).Norm();
-		}
-
-		double hole_len           = accumulate(edge_len.begin(), edge_len.end(), 0.0);
-		double min_concave_degree = 1000000000.0;
-		int    target_i = -1, target_j = -1;
-		for (int i = 0; i < curV.size(); i++) {
-			vector<double> eu_dists(curV.size());
-			for (int j = 0; j < curV.size(); j++) {
-				eu_dists[j] = (cm.vert[curV[i]].P() - cm.vert[curV[j]].P()).Norm();
-			}
-
-			for (int j = 0; j < curV.size(); j++) {
-				int    v0        = min(curV[i], curV[j]);
-				int    v1        = max(curV[i], curV[j]);
-				string edge_hash = to_string(v0) + "_" + to_string(v1);
-				if (find(edges_hash.begin(), edges_hash.end(), edge_hash) != edges_hash.end()) {
-					eu_dists[j] = 1000000000.0;
-				}
-			}
-
-			vector<double> geo_dists(curV.size());
-			partial_sum(edge_len.begin(), edge_len.end(), geo_dists.begin());
-			rotate(geo_dists.begin(), geo_dists.begin() + i, geo_dists.end());
-			transform(geo_dists.begin(), geo_dists.end(), geo_dists.begin(), [hole_len](double d) {
-				return min(d, hole_len - d);
-			});
-			rotate(geo_dists.begin(), geo_dists.begin() + i, geo_dists.end());
-			vector<double> concave_degree(curV.size());
-			transform(
-				eu_dists.begin(),
-				eu_dists.end(),
-				geo_dists.begin(),
-				concave_degree.begin(),
-				[](double eu, double geo) { return eu / (geo * geo + _epsilon); });
-			concave_degree[i] = -numeric_limits<double>::infinity(); // There may exist two duplicate vertices
-
-			vector<int> sorted_indices(concave_degree.size());
-			iota(sorted_indices.begin(), sorted_indices.end(), 0);
-			sort(sorted_indices.begin(), sorted_indices.end(), [&concave_degree](int a, int b) {
-				return concave_degree[a] < concave_degree[b];
-			});
-
-			int idx = 1;
-			int j   = sorted_indices[idx];
-			while (min((j + curV.size() - i) % curV.size(), (i + curV.size() - j) % curV.size()) <=
-				   1) {
-				idx++;
-				j = sorted_indices[idx];
-			}
-
-			if (concave_degree[j] < min_concave_degree) {
-				min_concave_degree = concave_degree[j];
-				target_i           = min(i, (int) j);
-				target_j           = max(i, (int) j);
-			}
-		}
-
-		queue.push_back(vector<int>(curV.begin() + target_i, curV.begin() + target_j + 1));
-		queue.push_back(vector<int>(curV.begin() + target_j, curV.end()));
-		queue.back().insert(queue.back().end(), curV.begin(), curV.begin() + target_i + 1);
-	}
-}
-
-double calculateAngle(const Point3f& p1, const Point3f& p2, const Point3f& p3)
-{
-	Point3f v1 = p1 - p2;
-	Point3f v2 = p3 - p2;
-	double dotProduct = v1.dot(v2);
-	return acos(dotProduct);
-}
-
-
-void closeHoleByConcavity2(CMeshO& cm, vector<int> vertIdx, vector<Triangle>& triangles)
-{
-	vector<string> edges_hash;
-	hashFunc(cm, edges_hash);
-
-	if (vertIdx.size() == 3) {
-		triangles.push_back({vertIdx[0], vertIdx[1], vertIdx[2]});
-		return;
-	}
-
-	vector<vector<int>> queue = {vector<int>(vertIdx.rbegin(), vertIdx.rend())};
-	while (!queue.empty()) {
-		vector<int> curV = queue.back();
-		queue.pop_back();
-		if (curV.size() == 3) {
-			triangles.push_back({curV[0], curV[1], curV[2]});
-			continue;
-		}
-
-		// Calculate angles
-		double min_angle = numeric_limits<double>::max();
-		int    min_idx   = -1;
-		for (int i = 0; i < curV.size(); i++) {
-			int    prev  = (i - 1 + curV.size()) % curV.size();
-			int    next  = (i + 1) % curV.size();
-			double angle = calculateAngle(
-				cm.vert[curV[prev]].P(), cm.vert[curV[i]].P(), cm.vert[curV[next]].P());
-			if (angle < min_angle) {
-				min_angle = angle;
-				min_idx   = i;
-			}
-		}
-
-		// Split the hole at the minimum angle
-		int prev = (min_idx - 1 + curV.size()) % curV.size();
-		int next = (min_idx + 1) % curV.size();
-		queue.push_back(vector<int>(curV.begin() + prev, curV.begin() + next + 1));
-		queue.push_back(vector<int>(curV.begin() + next, curV.end()));
-		queue.back().insert(queue.back().end(), curV.begin(), curV.begin() + prev + 1);
-	}
-}
-
-
-
 
 void divideCentroid(
 	CMeshO& cm,
@@ -705,24 +606,270 @@ void divideCentroid(
 	}
 }
 
-void fillInSegment(MeshModel& m, CMeshO& cm, Point3m a, Point3m b, vector<Point3m> boundaryPoints) 
+vector<int> fillInSegment(MeshModel& m, CMeshO& cm, Point3m a, Point3m b, vector<Point3m> boundaryPoints, int bitCheck, int idxMin, int idxMax, int idxSegment) 
 {
+	vector<int> newPoints;
 	float disAB = Distance(a, b);
 	float avgLen = 0;
 	for (int i = 0; i < boundaryPoints.size()-1; i++) {
 		avgLen += Distance(boundaryPoints[i], boundaryPoints[i + 1]);
 	}
 	avgLen /= (boundaryPoints.size()-1);
-
-	qDebug("%f, %f", disAB, avgLen);
-	qDebug("%f", round(disAB / avgLen));
-
-	for (float i = 1; i < round(disAB / avgLen); i++) {
+	float i;
+	for (i = 1; i < round(disAB / avgLen); i++) {
 		float ratio = (float) i / round(disAB / avgLen);
 		Point3m newPoint = a + (b - a) * ratio;
 		tri::Allocator<CMeshO>::AddVertex(cm, newPoint);
-		//m.updateDataMask();
+		newPoints.push_back(cm.vert.back().Index());
+		cm.vert.back().SetUserBit(bitCheck);
 	}
+
+	int cnt1 = 0, cnt2 = 0;
+	for (face::VFIterator<CMeshO::FaceType> vfi(&(cm.vert[idxMin])); !vfi.End(); ++vfi) {
+		int boundaryVCnt = 0;
+		if (vfi.f->V(0)->IsUserBit(bitCheck))
+			boundaryVCnt++;
+		if (vfi.f->V(1)->IsUserBit(bitCheck))
+			boundaryVCnt++;
+		if (vfi.f->V(2)->IsUserBit(bitCheck))
+			boundaryVCnt++;
+		if (boundaryVCnt < 2)
+			cnt1++;
+	}
+	if (cnt1) {
+		for (face::VFIterator<CMeshO::FaceType> vfi(&(cm.vert[idxMin])); !vfi.End(); ++vfi) {
+			int boundaryVCnt = 0;
+			if (vfi.f->V(0)->IsUserBit(bitCheck))
+				boundaryVCnt++;
+			if (vfi.f->V(1)->IsUserBit(bitCheck))
+				boundaryVCnt++;
+			if (vfi.f->V(2)->IsUserBit(bitCheck))
+				boundaryVCnt++;
+			if (boundaryVCnt < 2)
+				if (!vfi.f->V(0)->IsUserBit(bitCheck))
+					vfi.f->V(0)->C() = Color4b::Red;
+				else if (!vfi.f->V(1)->IsUserBit(bitCheck))
+					vfi.f->V(1)->C() = Color4b::Red;
+				else if (!vfi.f->V(2)->IsUserBit(bitCheck))
+					vfi.f->V(2)->C() = Color4b::Red;
+		}
+	}
+	else {
+		for (face::VFIterator<CMeshO::FaceType> vfi(&(cm.vert[idxMin])); !vfi.End(); ++vfi) {
+			if (!vfi.f->V(0)->IsUserBit(bitCheck))
+				vfi.f->V(0)->C() = Color4b::Red;
+			else if (!vfi.f->V(1)->IsUserBit(bitCheck))
+				vfi.f->V(1)->C() = Color4b::Red;
+			else if (!vfi.f->V(2)->IsUserBit(bitCheck))
+				vfi.f->V(2)->C() = Color4b::Red;
+			break;
+		}
+	}
+	for (face::VFIterator<CMeshO::FaceType> vfi(&(cm.vert[idxSegment])); !vfi.End(); ++vfi) {
+		int boundaryVCnt = 0;
+		if (vfi.f->V(0)->IsUserBit(bitCheck))
+			boundaryVCnt++;
+		if (vfi.f->V(1)->IsUserBit(bitCheck))
+			boundaryVCnt++;
+		if (vfi.f->V(2)->IsUserBit(bitCheck))
+			boundaryVCnt++;
+		if (boundaryVCnt < 2)
+			cnt2++;
+	}
+	if (cnt2 == 1) {
+		for (face::VFIterator<CMeshO::FaceType> vfi(&(cm.vert[idxSegment])); !vfi.End(); ++vfi) {
+			int boundaryVCnt = 0;
+			if (vfi.f->V(0)->IsUserBit(bitCheck))
+				boundaryVCnt++;
+			if (vfi.f->V(1)->IsUserBit(bitCheck))
+				boundaryVCnt++;
+			if (vfi.f->V(2)->IsUserBit(bitCheck))
+				boundaryVCnt++;
+			if (boundaryVCnt < 2)
+				if (!vfi.f->V(0)->IsUserBit(bitCheck))
+					vfi.f->V(0)->C() = Color4b::Red;
+				else if (!vfi.f->V(1)->IsUserBit(bitCheck))
+					vfi.f->V(1)->C() = Color4b::Red;
+				else if (!vfi.f->V(2)->IsUserBit(bitCheck))
+					vfi.f->V(2)->C() = Color4b::Red;
+		}
+	}
+	else {
+		for (face::VFIterator<CMeshO::FaceType> vfi(&(cm.vert[idxSegment])); !vfi.End(); ++vfi) {
+			if (!vfi.f->V(0)->IsUserBit(bitCheck))
+				vfi.f->V(0)->C() = Color4b::Red;
+			else if (!vfi.f->V(1)->IsUserBit(bitCheck))
+				vfi.f->V(1)->C() = Color4b::Red;
+			else if (!vfi.f->V(2)->IsUserBit(bitCheck))
+				vfi.f->V(2)->C() = Color4b::Red;
+			break;
+		}
+	}
+
+	return newPoints;
+}
+
+void refine(MeshModel&                m,
+			CMeshO&                   cm,
+			float                     densityFactor,
+			vector<Triangle>          triangles,
+			vector<int>               subhole1,
+			Hole                      curHole,
+			int                       patchBit,
+			unordered_map<int, float>& sigma,
+			unordered_map<int, int>&   revPos,
+			float                     total_len)
+{
+	float delta = densityFactor; // Density factor
+
+	vector<float>   centroidSigma;
+	vector<Point3m> centroid;
+	for (int tri_id = 0; tri_id < triangles.size(); tri_id++) {
+		Triangle curTri = triangles[tri_id];
+		Point3m  curCentroid =
+			(cm.vert[curTri.a].P() + cm.vert[curTri.b].P() + cm.vert[curTri.c].P()) / 3.0;
+		float curCentroidSigma = (sigma[curTri.a] + sigma[curTri.b] + sigma[curTri.c]) / 3.0;
+		centroidSigma.push_back(curCentroidSigma);
+		centroid.push_back(curCentroid);
+	}
+
+	while (true) {
+		// Identify divided triangle
+		bool                   created = false;
+		vector<pair<int, int>> swapEdges;
+		vector<int>            dividedTriangles;
+		for (int tri_id = 0; tri_id < triangles.size(); tri_id++) {
+			Triangle curTri           = triangles[tri_id];
+			float    curCentroidSigma = centroidSigma[tri_id];
+			Point3m  curCentroid      = centroid[tri_id];
+
+			// Check 3 vertices of current triangle
+			bool flag = true;
+			for (int m1 = 0; m1 < 3; m1++) {
+				Point3m curV;
+				float   curSigma;
+				if (!m1)
+					curSigma = sigma[curTri.a], curV = cm.vert[curTri.a].P();
+				else if (m1 == 1)
+					curSigma = sigma[curTri.b], curV = cm.vert[curTri.b].P();
+				else
+					curSigma = sigma[curTri.c], curV = cm.vert[curTri.c].P();
+
+				if (!(delta * Distance(curCentroid, curV) > curCentroidSigma) ||
+					!(delta * Distance(curCentroid, curV) > curSigma)) {
+					flag = false;
+					break;
+				}
+			}
+			if (flag ||
+				((delta * Distance(cm.vert[curTri.a].P(), cm.vert[curTri.b].P()) > total_len) &&
+				 (delta * Distance(cm.vert[curTri.a].P(), cm.vert[curTri.c].P()) > total_len) &&
+				 (delta * Distance(cm.vert[curTri.b].P(), cm.vert[curTri.b].P()) > total_len))) {
+				created = true;
+				dividedTriangles.push_back(tri_id);
+			}
+		}
+		divideCentroid(
+			cm, triangles, dividedTriangles, centroid, centroidSigma, sigma, swapEdges, patchBit);
+
+		// No triangle can be divided => The patching mesh is completed
+		if (!created)
+			break;
+
+		for (int e_id = 0; e_id < swapEdges.size(); e_id++) {
+			relaxEdge(
+				cm,
+				triangles,
+				swapEdges[e_id].first,
+				swapEdges[e_id].second,
+				centroid,
+				sigma,
+				centroidSigma);
+		}
+
+		// Relax all interior edges
+		int  cnt       = 0;
+		bool isSwapped = false;
+		while (!isSwapped && cnt <= 100) {
+			isSwapped = false;
+			// relax(cm, triangles, cntSwap, cntSame, centroid, sigma, centroidSigma);
+			for (int tri_id = 0; tri_id < triangles.size(); tri_id++) {
+				Triangle curTri = triangles[tri_id];
+
+				// Make sure this is not boundary edge
+				int cntCheck = 0;
+				for (int v_id = 0; v_id < curHole.vertIdx.size(); v_id++) {
+					if (curTri.a == curHole.vertIdx[v_id])
+						cntCheck++;
+					if (curTri.b == curHole.vertIdx[v_id])
+						cntCheck++;
+				}
+				if (cntCheck != 2)
+					isSwapped = relaxEdge(
+						cm, triangles, curTri.a, curTri.b, centroid, sigma, centroidSigma);
+				else if (
+					abs(revPos[cm.vert[curTri.a].Index()] - revPos[cm.vert[curTri.b].Index()]) !=
+					1) {
+					isSwapped = relaxEdge(
+						cm, triangles, curTri.a, curTri.b, centroid, sigma, centroidSigma);
+				}
+
+				cntCheck = 0;
+				for (int v_id = 0; v_id < curHole.vertIdx.size(); v_id++) {
+					if (curTri.b == curHole.vertIdx[v_id])
+						cntCheck++;
+					if (curTri.c == curHole.vertIdx[v_id])
+						cntCheck++;
+				}
+				if (cntCheck != 2)
+					isSwapped = relaxEdge(
+						cm, triangles, curTri.b, curTri.c, centroid, sigma, centroidSigma);
+				else if (
+					abs(revPos[cm.vert[curTri.c].Index()] - revPos[cm.vert[curTri.b].Index()]) !=
+					1) {
+					isSwapped = relaxEdge(
+						cm, triangles, curTri.b, curTri.c, centroid, sigma, centroidSigma);
+				}
+
+				cntCheck = 0;
+				for (int v_id = 0; v_id < curHole.vertIdx.size(); v_id++) {
+					if (curTri.a == curHole.vertIdx[v_id])
+						cntCheck++;
+					if (curTri.c == curHole.vertIdx[v_id])
+						cntCheck++;
+				}
+				if (cntCheck != 2)
+					isSwapped = relaxEdge(
+						cm, triangles, curTri.c, curTri.a, centroid, sigma, centroidSigma);
+				else if (
+					abs(revPos[cm.vert[curTri.c].Index()] - revPos[cm.vert[curTri.a].Index()]) !=
+					1) {
+					isSwapped = relaxEdge(
+						cm, triangles, curTri.c, curTri.a, centroid, sigma, centroidSigma);
+				}
+			}
+			cnt++;
+		}
+	}
+
+	// Add triangles into mesh
+	for (int tri_id = 0; tri_id < triangles.size(); tri_id++) {
+		Triangle curTri = triangles[tri_id];
+		tri::Allocator<CMeshO>::AddFace(cm, curTri.a, curTri.b, curTri.c);
+		cm.face.back().SetV();
+		cm.vert[curTri.a].SetV();
+		cm.vert[curTri.b].SetV();
+		cm.vert[curTri.c].SetV();
+		m.cm.face.back().C() = Color4b::Magenta;
+	}
+
+	// Update topology, normal. Delete duplicate vertices, faces
+	tri::UpdateBounding<CMeshO>::Box(cm);
+	tri::UpdateNormal<CMeshO>::NormalizePerVertex(cm);
+	tri::UpdateTopology<CMeshO>::FaceFace(cm);
+	tri::UpdateTopology<CMeshO>::VertexFace(cm);
+	tri::Clean<CMeshO>::RemoveDuplicateFace(cm);
+	tri::Clean<CMeshO>::RemoveDuplicateVertex(cm);
 }
 
 std::map<std::string, QVariant> QhullPlugin::applyFilter(
@@ -760,6 +907,8 @@ std::map<std::string, QVariant> QhullPlugin::applyFilter(
 
 		// Initial parameter
 		int  MaxHoleSize = par.getInt("MaxHoleSize");
+		float edgeLength    = par.getFloat("edgeLength");
+		float  densityFactor = par.getFloat("densityFactor");
 		int  itFair      = par.getInt("itFair");
 		bool holeRefine  = par.getBool("holeRefine");
 		bool fairing     = par.getBool("fairing");
@@ -836,7 +985,6 @@ std::map<std::string, QVariant> QhullPlugin::applyFilter(
 					cm.vert[curHole.vertIdx[i]].SetUserBit(patchBit);
 
 			vector<Triangle> triangles;
-			closeHoleByConcavity(cm, curHole.vertIdx, triangles);
 
 			//Color again the hole
 			for (int i : curHole.vertIdx) {
@@ -853,279 +1001,167 @@ std::map<std::string, QVariant> QhullPlugin::applyFilter(
 			float maxZ = -1000000000.0;
 			int   idxMax  = -1;
 			int   idxMin  = -1;
+			int   idxMin2; // Index in vertIdx
 			float avgZ = 0;
-			vector<Point3m> boundaryPoints;
 			for (int i = 0; i < curHole.vertIdx.size(); i++) {
-				boundaryPoints.push_back(cm.vert[curHole.vertIdx[i]].P());
 				avgZ += cm.vert[curHole.vertIdx[i]].P().Z();
-
-				if (maxZ < cm.vert[curHole.vertIdx[i]].P().Z()) {
-					maxZ = cm.vert[curHole.vertIdx[i]].P().Z();
-					idxMax  = curHole.vertIdx[i];
-				}
+				int nxt = (i == curHole.vertIdx.size() - 1 ? 0 : i + 1);
 				if (minZ > cm.vert[curHole.vertIdx[i]].P().Z()) {
-					minZ   = cm.vert[curHole.vertIdx[i]].P().Z();
 					idxMin = curHole.vertIdx[i];
+					idxMin2 = i;
+					minZ   = cm.vert[curHole.vertIdx[i]].P().Z();
+				}
+				if (maxZ < cm.vert[curHole.vertIdx[i]].P().Z()) {
+					idxMax = curHole.vertIdx[i];
+					maxZ   = cm.vert[curHole.vertIdx[i]].P().Z();
 				}
 			}
 			avgZ /= curHole.vertIdx.size();
-			cm.vert[idxMin].C() = Color4b::Yellow;
 
-			cm.vert[188].C() = Color4b::Yellow;
-			fillInSegment(m, cm, cm.vert[idxMin].P(), cm.vert[188].P(), boundaryPoints);
+			float minDiffZ = 1e9;
+			int   minDiffZIdx;
+			int   minDiffZIdx2;
+			for (int i = 0; i < curHole.vertIdx.size(); i++) {
+				if (curHole.vertIdx[i] == idxMin || avgZ < cm.vert[curHole.vertIdx[i]].P().Z() || abs(idxMin2 - i) < curHole.vertIdx.size()/3)
+					continue;
 
-			//rotateInverse(md, rotateM);
+				float diffZ = abs(cm.vert[curHole.vertIdx[i]].P().Z() - cm.vert[idxMin].P().Z());
+				float dis   = Distance(cm.vert[curHole.vertIdx[i]].P(), cm.vert[idxMin].P());
+				log("DiffZ: %f", diffZ);
+				if (minDiffZ > diffZ) {
+					minDiffZ = diffZ;
+					minDiffZIdx = curHole.vertIdx[i];
+					minDiffZIdx2 = i;
+				}
+				log("Distance: %f", dis);
+			}
+			cm.vert[minDiffZIdx].C() = Color4b::Black;
+			vector<Point3m> boundaryPoints;
+			for (int i = 0; i < curHole.vertIdx.size(); i++) {
+				boundaryPoints.push_back(cm.vert[curHole.vertIdx[i]].P());
+			}
+			vector<int> newPoints = fillInSegment(
+				m,
+				cm,
+				cm.vert[idxMin].P(),
+				cm.vert[minDiffZIdx].P(),
+				boundaryPoints,
+				boundaryBit,
+				idxMin,
+				idxMax,
+				minDiffZIdx);
+			vector<int> subhole1, subhole2;
+			//First subhole
+			subhole1.push_back(curHole.vertIdx[idxMin2]);
+			int nxtIdx = idxMin2;
+			while (true) {
+				nxtIdx = (nxtIdx == 0 ? curHole.vertIdx.size() - 1 : nxtIdx - 1);
+				if (nxtIdx == minDiffZIdx2) {
+					subhole1.push_back(curHole.vertIdx[nxtIdx]);
+					break;
+				}
+				subhole1.push_back(curHole.vertIdx[nxtIdx]);
+			}
+			reverse(newPoints.begin(), newPoints.end());
+			for (auto i : newPoints) {
+				subhole1.push_back(i);
+			}
+			int idxCenter = closeHoleByCenter2(cm, subhole1, triangles);
+			subhole1.push_back(idxCenter);
 
+			// Second subhole
+			vector<Triangle> triangles2;
+			subhole2.push_back(curHole.vertIdx[idxMin2]);
+			nxtIdx = idxMin2;
+			while (true) {
+				nxtIdx = (nxtIdx == curHole.vertIdx.size() - 1 ? 0 : nxtIdx + 1);
+				if (nxtIdx == minDiffZIdx2) {
+					subhole2.push_back(curHole.vertIdx[nxtIdx]);
+					break;
+				}
+				subhole2.push_back(curHole.vertIdx[nxtIdx]);
+			}
+			for (auto i : newPoints) {
+				subhole2.push_back(i);
+			}
+			idxCenter = closeHoleByCenter2(cm, subhole2, triangles2);
+			subhole2.push_back(idxCenter);
+			rotateInverse(md, rotateM);
 
 			// Mesh refinement
 			if (holeRefine) {
-				float delta = 1.55; // Density factor
-
 				unordered_map<int, float> sigma;
 				unordered_map<int, int>   revPos;
 				float                     total_len = 0;
 				for (int v_id = 0; v_id < curHole.vertIdx.size(); v_id++) {
 					revPos[curHole.vertIdx[v_id]] = v_id;
-					int idx    = curHole.vertIdx[v_id];
-					sigma[idx] = calcSigma(cm, idx);
-					total_len += sigma[idx];
+					int idx                       = curHole.vertIdx[v_id];
+					sigma[idx]                    = (edgeLength == -1.0 ? calcSigma(cm, idx) : edgeLength);
+					total_len += calcSigma(cm, idx);
 				}
 				total_len /= curHole.vertIdx.size();
+				for (int v_id = 0; v_id < subhole1.size(); v_id++) {
+					sigma[subhole1[v_id]] = (edgeLength == -1.0 ? total_len : edgeLength);
+				}
+				refine(m, cm, densityFactor, triangles, subhole1, curHole, patchBit, sigma, revPos, total_len);
+				sigma.clear();
+				revPos.clear();
 				for (int v_id = 0; v_id < curHole.vertIdx.size(); v_id++) {
-					int idx    = curHole.vertIdx[v_id];
-					sigma[idx] = total_len;
+					revPos[curHole.vertIdx[v_id]] = v_id;
+					int idx                       = curHole.vertIdx[v_id];
+					sigma[idx]                    = (edgeLength == -1.0 ? total_len : edgeLength);
 				}
-
-
-				vector<float>   centroidSigma;
-				vector<Point3m> centroid;
-				for (int tri_id = 0; tri_id < triangles.size(); tri_id++) {
-					Triangle curTri = triangles[tri_id];
-					Point3m  curCentroid =
-						(cm.vert[curTri.a].P() + cm.vert[curTri.b].P() + cm.vert[curTri.c].P()) /
-						3.0;
-					float curCentroidSigma =
-						(sigma[curTri.a] + sigma[curTri.b] + sigma[curTri.c]) / 3.0;
-					centroidSigma.push_back(curCentroidSigma);
-					centroid.push_back(curCentroid);
+				for (int v_id = 0; v_id < subhole2.size(); v_id++) {
+					sigma[subhole2[v_id]] = (edgeLength == -1.0 ? total_len : edgeLength);
 				}
-
-				while (true) {
-					// Identify divided triangle
-					bool                   created = false;
-					vector<pair<int, int>> swapEdges;
-					vector<int>            dividedTriangles;
-					for (int tri_id = 0; tri_id < triangles.size(); tri_id++) {
-						Triangle curTri           = triangles[tri_id];
-						float    curCentroidSigma = centroidSigma[tri_id];
-						Point3m  curCentroid      = centroid[tri_id];
-
-						// Check 3 vertices of current triangle
-						bool flag = true;
-						for (int m1 = 0; m1 < 3; m1++) {
-							Point3m curV;
-							float   curSigma;
-							if (!m1)
-								curSigma = sigma[curTri.a], curV = cm.vert[curTri.a].P();
-							else if (m1 == 1)
-								curSigma = sigma[curTri.b], curV = cm.vert[curTri.b].P();
-							else
-								curSigma = sigma[curTri.c], curV = cm.vert[curTri.c].P();
-
-							if (!(delta * Distance(curCentroid, curV) > curCentroidSigma) ||
-								!(delta * Distance(curCentroid, curV) > curSigma)) {
-								flag = false;
-								break;
+				refine(m, cm, densityFactor, triangles2, subhole2, curHole, patchBit, sigma, revPos, total_len);
+				if (fairing) {
+					for (int it = 0; it < itFair; it++) {
+						int      vNum   = cm.vert.size();
+						int      fNum   = cm.face.size();
+						int      inVNum = 0;
+						MatrixXd V(vNum, 3);
+						MatrixXi F(fNum, 3);
+						for (int i = 0; i < vNum; i++) {
+							if (cm.vert[i].IsUserBit(patchBit))
+								inVNum++;
+							Point3m curPoint = cm.vert[i].P();
+							V(i, 0)          = curPoint.X();
+							V(i, 1)          = curPoint.Y();
+							V(i, 2)          = curPoint.Z();
+						}
+						for (int i = 0; i < fNum; i++) {
+							F(i, 0) = cm.face[i].V(0)->Index();
+							F(i, 1) = cm.face[i].V(1)->Index();
+							F(i, 2) = cm.face[i].V(2)->Index();
+						}
+						MatrixXd bc(vNum - inVNum, 3);
+						VectorXi b(vNum - inVNum);
+						int      idx = 0;
+						for (int i = 0; i < vNum; i++) {
+							if (!cm.vert[i].IsUserBit(patchBit)) {
+								b(idx)     = i;
+								bc(idx, 0) = cm.vert[i].P().X();
+								bc(idx, 1) = cm.vert[i].P().Y();
+								bc(idx, 2) = cm.vert[i].P().Z();
+								idx++;
 							}
 						}
-						if (flag ||
-							((delta * Distance(cm.vert[curTri.a].P(), cm.vert[curTri.b].P()) >
-							  total_len) &&
-							 (delta * Distance(cm.vert[curTri.a].P(), cm.vert[curTri.c].P()) >
-							  total_len) &&
-							 (delta * Distance(cm.vert[curTri.b].P(), cm.vert[curTri.b].P()) >
-							  total_len))) {
-							created                   = true;
-							dividedTriangles.push_back(tri_id);
+						MatrixXd update;
+						igl::harmonic(V, F, b, bc, 2, update);
+						for (int i = 0; i < vNum; i++) {
+							if (cm.vert[i].IsUserBit(patchBit))
+								if (!std::isnan(update(i, 0)) && !std::isnan(update(i, 1)) &&
+									!std::isnan(update(i, 2))) {
+									cm.vert[i].P() =
+										Point3m(update(i, 0), update(i, 1), update(i, 2));
+								}
 						}
 					}
-					divideCentroid(cm, triangles, dividedTriangles, centroid, centroidSigma, sigma, swapEdges, patchBit);
-
-					// No triangle can be divided => The patching mesh is completed
-					if (!created)
-						break;
-
-					for (int e_id = 0; e_id < swapEdges.size(); e_id++) {
-						relaxEdge(
-							cm,
-							triangles,
-							swapEdges[e_id].first,
-							swapEdges[e_id].second,
-							centroid,
-							sigma,
-							centroidSigma);
-					}
-
-					// Relax all interior edges
-					int  cnt       = 0;
-					bool isSwapped = false;
-					while (!isSwapped && cnt <= 100) {
-						isSwapped = false;
-						// relax(cm, triangles, cntSwap, cntSame, centroid, sigma, centroidSigma);
-						for (int tri_id = 0; tri_id < triangles.size(); tri_id++) {
-							Triangle curTri = triangles[tri_id];
-
-							// Make sure this is not boundary edge
-							int cntCheck = 0;
-							for (int v_id = 0; v_id < curHole.vertIdx.size(); v_id++) {
-								if (curTri.a == curHole.vertIdx[v_id])
-									cntCheck++;
-								if (curTri.b == curHole.vertIdx[v_id])
-									cntCheck++;
-							}
-							if (cntCheck != 2)
-								isSwapped = relaxEdge(
-									cm,
-									triangles,
-									curTri.a,
-									curTri.b,
-									centroid,
-									sigma,
-									centroidSigma);
-							else if (abs(revPos[cm.vert[curTri.a].Index()] - revPos[cm.vert[curTri.b].Index()]) != 1) {
-								isSwapped = relaxEdge(
-									cm,
-									triangles,
-									curTri.a,
-									curTri.b,
-									centroid,
-									sigma,
-									centroidSigma);
-							}
-
-							cntCheck = 0;
-							for (int v_id = 0; v_id < curHole.vertIdx.size(); v_id++) {
-								if (curTri.b == curHole.vertIdx[v_id])
-									cntCheck++;
-								if (curTri.c == curHole.vertIdx[v_id])
-									cntCheck++;
-							}
-							if (cntCheck != 2)
-								isSwapped = relaxEdge(
-									cm,
-									triangles,
-									curTri.b,
-									curTri.c,
-									centroid,
-									sigma,
-									centroidSigma);
-							else if (abs(revPos[cm.vert[curTri.c].Index()] - revPos[cm.vert[curTri.b].Index()]) != 1) {
-								isSwapped = relaxEdge(
-									cm,
-									triangles,
-									curTri.b,
-									curTri.c,
-									centroid,
-									sigma,
-									centroidSigma);
-							}
-
-							cntCheck = 0;
-							for (int v_id = 0; v_id < curHole.vertIdx.size(); v_id++) {
-								if (curTri.a == curHole.vertIdx[v_id])
-									cntCheck++;
-								if (curTri.c == curHole.vertIdx[v_id])
-									cntCheck++;
-							}
-							if (cntCheck != 2)
-								isSwapped = relaxEdge(
-									cm,
-									triangles,
-									curTri.c,
-									curTri.a,
-									centroid,
-									sigma,
-									centroidSigma);
-							else if (abs(revPos[cm.vert[curTri.c].Index()] - revPos[cm.vert[curTri.a].Index()]) != 1) {
-								isSwapped = relaxEdge(
-									cm,
-									triangles,
-									curTri.c,
-									curTri.a,
-									centroid,
-									sigma,
-									centroidSigma);
-							}
-						}
-						cnt++;
-					}
+					for (int i = 0; i < curHole.vertIdx.size(); i++)
+						if (cm.vert[curHole.vertIdx[i]].IsUserBit(patchBit))
+							cm.vert[curHole.vertIdx[i]].ClearUserBit(patchBit);
 				}
-			} 
-
-			// Add triangles into mesh
-			for (int tri_id = 0; tri_id < triangles.size(); tri_id++) {
-				Triangle curTri = triangles[tri_id];
-				tri::Allocator<CMeshO>::AddFace(cm, curTri.a, curTri.b, curTri.c);
-				cm.face.back().SetV();
-				cm.vert[curTri.a].SetV();
-				cm.vert[curTri.b].SetV();
-				cm.vert[curTri.c].SetV();
-				m.cm.face.back().C() = Color4b::Magenta;
-			}
-
-			// Update topology, normal. Delete duplicate vertices, faces
-			tri::UpdateBounding<CMeshO>::Box(cm);
-			tri::UpdateNormal<CMeshO>::NormalizePerVertex(cm);
-			tri::UpdateTopology<CMeshO>::FaceFace(cm);
-			tri::UpdateTopology<CMeshO>::VertexFace(cm);
-			tri::Clean<CMeshO>::RemoveDuplicateFace(cm);
-			tri::Clean<CMeshO>::RemoveDuplicateVertex(cm);
-
-			if (fairing) {
-				for (int it = 0; it < itFair; it++) {
-					int      vNum   = cm.vert.size();
-					int      fNum   = cm.face.size();
-					int      inVNum = 0;
-					MatrixXd V(vNum, 3);
-					MatrixXi F(fNum, 3);
-					for (int i = 0; i < vNum; i++) {
-						if (cm.vert[i].IsUserBit(patchBit))
-							inVNum++;
-						Point3m curPoint = cm.vert[i].P();
-						V(i, 0)          = curPoint.X();
-						V(i, 1)          = curPoint.Y();
-						V(i, 2)          = curPoint.Z();
-					}
-					for (int i = 0; i < fNum; i++) {
-						F(i, 0) = cm.face[i].V(0)->Index();
-						F(i, 1) = cm.face[i].V(1)->Index();
-						F(i, 2) = cm.face[i].V(2)->Index();
-					}
-					MatrixXd bc(vNum - inVNum, 3);
-					VectorXi b(vNum - inVNum);
-					int      idx = 0;
-					for (int i = 0; i < vNum; i++) {
-						if (!cm.vert[i].IsUserBit(patchBit)) {
-							b(idx)     = i;
-							bc(idx, 0) = cm.vert[i].P().X();
-							bc(idx, 1) = cm.vert[i].P().Y();
-							bc(idx, 2) = cm.vert[i].P().Z();
-							idx++;
-						}
-					}
-					MatrixXd update;
-					igl::harmonic(V, F, b, bc, 2, update);
-					for (int i = 0; i < vNum; i++) {
-						if (cm.vert[i].IsUserBit(patchBit))
-							if (!std::isnan(update(i, 0)) && !std::isnan(update(i, 1)) &&
-								!std::isnan(update(i, 2))) {
-								cm.vert[i].P() = Point3m(update(i, 0), update(i, 1), update(i, 2));
-							}
-					}
-				}
-				for (int i = 0; i < curHole.vertIdx.size(); i++)
-					if (cm.vert[curHole.vertIdx[i]].IsUserBit(patchBit))
-						cm.vert[curHole.vertIdx[i]].ClearUserBit(patchBit);
 			}
 		}
 
